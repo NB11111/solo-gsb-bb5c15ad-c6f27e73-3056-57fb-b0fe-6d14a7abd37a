@@ -288,6 +288,61 @@ class ReconcileResponse(BaseModel):
     total_penalty: int = Field(..., description="总罚分（匹配偏差绝对值之和 + 未匹配罚分）")
 
 
+class MergeRequest(BaseModel):
+    """POST /versions/merge 请求体：base / left / right 三份口令数组。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    base: list[CommandItem] = Field(
+        ..., description="基准版本的口令数组，格式与 POST /compile 的请求体一致"
+    )
+    left: list[CommandItem] = Field(
+        ..., description="左侧版本的口令数组，格式与 POST /compile 的请求体一致"
+    )
+    right: list[CommandItem] = Field(
+        ..., description="右侧版本的口令数组，格式与 POST /compile 的请求体一致"
+    )
+
+
+class MergeDivergence(BaseModel):
+    """一条字段级分歧：两侧相对 base 把同一字段改成了不同值（含删除 vs 修改）。"""
+
+    id: str = Field(..., description="发生分歧的口令 id")
+    field: Literal["channel", "anchor", "offset_ms", "duration_ms"] = Field(
+        ..., description="发生分歧的字段"
+    )
+    base: str | int | None = Field(
+        ..., description="base 版本的字段值；null 表示 base 中不存在此口令"
+    )
+    left: str | int | None = Field(
+        ..., description="left 版本的字段值；null 表示 left 中不存在此口令（已删除）"
+    )
+    right: str | int | None = Field(
+        ..., description="right 版本的字段值；null 表示 right 中不存在此口令（已删除）"
+    )
+
+
+class MergeResponse(BaseModel):
+    divergences: list[MergeDivergence] = Field(
+        ...,
+        description=(
+            "字段级分歧列表，按 (id, field) 排序；为空表示无分歧、合并成功"
+        ),
+    )
+    merged: list[CommandItem] | None = Field(
+        ...,
+        description="无分歧时的合并口令（已补全默认字段），按 id 升序；有分歧时为 null",
+    )
+    timeline: list[TimelineEntry] | None = Field(
+        ...,
+        description="无分歧时合并口令解析出的时间线，与 /compile 同结构；有分歧时为 null",
+    )
+    conflicts: list[ConflictPair] | None = Field(
+        ...,
+        description="无分歧时合并口令的冲突对，与 /compile 同结构；有分歧时为 null",
+    )
+
+
 class ErrorBody(BaseModel):
     code: Literal[
         "INVALID_REQUEST",

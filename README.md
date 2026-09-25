@@ -6,7 +6,8 @@
 可压缩余量比例分配给未播段；直播结束后可将计划口令与实播记录按通道保序对账，
 以最小的起止偏差与漏播、额外播出罚分还原实际播出情况；还可在不改变任何起止
 时刻的前提下，把口令全局改派到按 id 指定的备用通道，求改派口令最少、并列时
-通道名序列字典序最小的无冲突方案。
+通道名序列字典序最小的无冲突方案；亦可对 base / left / right 三份口令版本按
+id 与字段做三方合并，分歧按 (id, 字段) 返回，无分歧时校验并输出合并编排。
 
 - 在线接口文档（Swagger UI）：<http://localhost:8000/docs>
 - 健康检查：`GET /health`
@@ -15,6 +16,7 @@
 - 节目单延误分摊接口：`POST /schedule/rebalance`
 - 实播对账接口：`POST /runs/reconcile`
 - 通道改派接口：`POST /routing/assign`
+- 三方合并接口：`POST /versions/merge`
 
 ## 一条命令启动
 
@@ -693,6 +695,156 @@ curl -s http://localhost:8000/routing/assign \
 }
 ```
 
+## 接口约定：`POST /versions/merge`
+
+对 **base / left / right 三份口令版本**做三方合并：先补全默认字段
+（`anchor` 缺省 `START`、`offset_ms` 缺省 `0`），再以 `id` 为合并键、
+逐字段（`channel` / `anchor` / `offset_ms` / `duration_ms`）裁决。请求无状态，
+不落地任何数据。
+
+请求体为一个对象：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `base` | array | 是 | 基准版本的口令数组，每一项的字段与 `POST /compile` 的请求体完全一致 |
+| `left` | array | 是 | 左侧版本的口令数组，格式同上 |
+| `right` | array | 是 | 右侧版本的口令数组，格式同上 |
+
+合并规则（对每个 `id` 的每个字段独立裁决）：
+
+- **两侧相同直接采纳**：都未改、改成相同值、都删除，或双侧新增内容一致。
+- **仅一侧改动采纳该侧**：另一侧取值与 base 相同（含另一侧不存在此口令）。
+- **两侧改成不同值记分歧**：包括一侧删除而另一侧修改（删除视为该口令全部
+  字段缺席），以及同 id 双侧新增但内容不同；分歧按 `(id, field)` 排序返回，
+  **只要存在分歧就不生成合并结果**（`merged` / `timeline` / `conflicts` 为 `null`）。
+- **两侧分别修改不同字段**时，两处改动合并到同一条口令。
+- 无分歧时把合并口令交给与 `/compile` 相同的编排器校验：缺失锚点、依赖环、
+  负起点等按原错误码返回 `422`；校验通过才返回合并结果。
+
+响应字段（均返回 `200`）：
+
+- `divergences`：字段级分歧列表，按 `(id, field)` 排序；每项含 `id`、`field`
+  与 `base` / `left` / `right` 三侧取值，`null` 表示该侧不存在此口令。
+  为空数组表示无分歧、合并成功。
+- `merged`：无分歧时的合并口令（已补全默认字段），**按 id 升序**；有分歧时为 `null`。
+- `timeline` / `conflicts`：无分歧时对合并口令的编排结果，结构与 `/compile`
+  完全一致；有分歧时为 `null`。
+
+### 请求示例（无分歧：不同字段合并 + 单侧增删）
+
+base 有 `a`、`b`、`c` 三条口令；left 把 `a.duration_ms` 改为 1200 并删除 `c`，
+right 把 `b.offset_ms` 改为 200 并新增 `d`：
+
+```bash
+curl -s http://localhost:8000/versions/merge \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "base": [
+      {"id": "a", "channel": "main", "anchor": "START", "offset_ms": 0, "duration_ms": 1000},
+      {"id": "b", "channel": "main", "anchor": "a",     "offset_ms": 0, "duration_ms": 500},
+      {"id": "c", "channel": "sub",  "anchor": "START", "offset_ms": 0, "duration_ms": 800}
+    ],
+    "left": [
+      {"id": "a", "channel": "main", "anchor": "START", "offset_ms": 0, "duration_ms": 1200},
+      {"id": "b", "channel": "main", "anchor": "a",     "offset_ms": 0, "duration_ms": 500}
+    ],
+    "right": [
+      {"id": "a", "channel": "main", "anchor": "START", "offset_ms": 0,   "duration_ms": 1000},
+      {"id": "b", "channel": "main", "anchor": "a",     "offset_ms": 200, "duration_ms": 500},
+      {"id": "c", "channel": "sub",  "anchor": "START", "offset_ms": 0,   "duration_ms": 800},
+      {"id": "d", "channel": "sub",  "anchor": "b",     "offset_ms": 0,   "duration_ms": 300}
+    ]
+  }'
+```
+
+两侧改动互不冲突：`a` 取 left 的时长、`b` 取 right 的偏移、`c` 按 left 删除、
+`d` 按 right 新增。响应示例（`200`）：
+
+```json
+{
+  "divergences": [],
+  "merged": [
+    {"id": "a", "channel": "main", "anchor": "START", "offset_ms": 0,   "duration_ms": 1200},
+    {"id": "b", "channel": "main", "anchor": "a",     "offset_ms": 200, "duration_ms": 500},
+    {"id": "d", "channel": "sub",  "anchor": "b",     "offset_ms": 0,   "duration_ms": 300}
+  ],
+  "timeline": [
+    {"id": "a", "channel": "main", "anchor": "START", "offset_ms": 0,   "duration_ms": 1200, "start_ms": 0,    "end_ms": 1200},
+    {"id": "b", "channel": "main", "anchor": "a",     "offset_ms": 200, "duration_ms": 500,  "start_ms": 1400, "end_ms": 1900},
+    {"id": "d", "channel": "sub",  "anchor": "b",     "offset_ms": 0,   "duration_ms": 300,  "start_ms": 1900, "end_ms": 2200}
+  ],
+  "conflicts": []
+}
+```
+
+### 请求示例（有分歧：同字段不同值 + 删除 vs 修改）
+
+left 把 `a.duration_ms` 改为 1200、right 改为 1500（同字段不同值）；
+left 删除 `b`、right 把 `b.offset_ms` 改为 100（删除 vs 修改）：
+
+```bash
+curl -s http://localhost:8000/versions/merge \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "base": [
+      {"id": "a", "channel": "main", "anchor": "START", "offset_ms": 0, "duration_ms": 1000},
+      {"id": "b", "channel": "main", "anchor": "a",     "offset_ms": 0, "duration_ms": 500}
+    ],
+    "left": [
+      {"id": "a", "channel": "main", "anchor": "START", "offset_ms": 0, "duration_ms": 1200}
+    ],
+    "right": [
+      {"id": "a", "channel": "main", "anchor": "START", "offset_ms": 0,   "duration_ms": 1500},
+      {"id": "b", "channel": "main", "anchor": "a",     "offset_ms": 100, "duration_ms": 500}
+    ]
+  }'
+```
+
+响应示例（`200`）：分歧按 `(id, field)` 排序，不生成合并结果：
+
+```json
+{
+  "divergences": [
+    {"id": "a", "field": "duration_ms", "base": 1000, "left": 1200, "right": 1500},
+    {"id": "b", "field": "offset_ms",   "base": 0,    "left": null, "right": 100}
+  ],
+  "merged": null,
+  "timeline": null,
+  "conflicts": null
+}
+```
+
+### 请求示例（合并口令编排失败，422）
+
+left 删除锚点口令 `a`（right 未改动 `a`，采纳删除），但 `b` 仍锚定 `a`：
+合并无分歧，编排校验报 `MISSING_ANCHOR`：
+
+```bash
+curl -s http://localhost:8000/versions/merge \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "base": [
+      {"id": "a", "channel": "main", "anchor": "START", "offset_ms": 0, "duration_ms": 1000},
+      {"id": "b", "channel": "main", "anchor": "a",     "offset_ms": 0, "duration_ms": 500}
+    ],
+    "left": [
+      {"id": "b", "channel": "main", "anchor": "a", "offset_ms": 0, "duration_ms": 500}
+    ],
+    "right": [
+      {"id": "a", "channel": "main", "anchor": "START", "offset_ms": 0, "duration_ms": 1000},
+      {"id": "b", "channel": "main", "anchor": "a",     "offset_ms": 0, "duration_ms": 500}
+    ]
+  }'
+```
+
+```json
+{
+  "code": "MISSING_ANCHOR",
+  "message": "存在指向未知锚点的口令",
+  "details": { "ids": ["b"], "anchors": ["a"] }
+}
+```
+
 ## 错误处理
 
 所有业务错误均返回 HTTP `422`，响应体统一为：
@@ -768,6 +920,17 @@ curl -s http://localhost:8000/routing/assign \
   `INSUFFICIENT_CHANNEL_CAPACITY`。
 - 服务端不会修改请求数据；改派不改变任何起止时刻，`timeline` 仅 `channel` 可能变化。
 
+`POST /versions/merge` 额外约定：
+
+- `base` / `left` / `right` 均为与 `/compile` 同格式的口令数组；字段缺失、
+  类型错误或出现多余字段时返回 `INVALID_REQUEST`。
+- 任一份数组内部出现重复 `id` 时返回 `DUPLICATE_ID`，`details.side` 指明是
+  哪一份（`base` / `left` / `right`）。
+- 分歧不是错误：存在分歧时同样返回 `200`，`divergences` 非空且
+  `merged` / `timeline` / `conflicts` 为 `null`。
+- 无分歧时对合并口令执行与 `/compile` 完全一致的校验，重复 id、缺失锚点、
+  依赖环、负起点等按原错误码返回 `422`；服务端不会修改请求数据。
+
 ## 本地开发（不使用 Docker）
 
 要求 Python 3.11+：
@@ -779,7 +942,7 @@ uvicorn app.main:app --reload --port 8000
 
 核心编排逻辑位于 `app/compiler.py`，节目单延误分摊逻辑位于 `app/rebalance.py`，
 实播对账逻辑位于 `app/reconcile.py`，通道改派逻辑位于 `app/routing.py`，
-均仅使用标准库，可直接运行单元测试：
+三方合并逻辑位于 `app/merge.py`，均仅使用标准库，可直接运行单元测试：
 
 ```bash
 python3 -m unittest discover -s tests
@@ -795,13 +958,15 @@ python3 -m unittest discover -s tests
 │   ├── rebalance.py       # 纯标准库的节目单延误分摊（固定点切窗 + 余量比例分摊）
 │   ├── reconcile.py       # 纯标准库的实播对账（通道内保序一对一匹配 + 最小罚分 DP）
 │   ├── routing.py         # 纯标准库的通道改派（位掩码分支限界：最少改派 + 字典序裁决）
+│   ├── merge.py           # 纯标准库的三方合并（按 id 与字段裁决 + 分歧收集）
 │   ├── schemas.py         # Pydantic 请求与响应模型
-│   └── main.py            # FastAPI 入口（/compile、/preview、/schedule/rebalance、/runs/reconcile、/routing/assign、/health、统一错误处理）
+│   └── main.py            # FastAPI 入口（/compile、/preview、/schedule/rebalance、/runs/reconcile、/routing/assign、/versions/merge、/health、统一错误处理）
 ├── tests/
 │   ├── test_compiler.py   # 编排核心逻辑单元测试（标准库 unittest）
 │   ├── test_rebalance.py  # 延误分摊核心逻辑单元测试（标准库 unittest）
 │   ├── test_reconcile.py  # 实播对账核心逻辑单元测试（标准库 unittest）
-│   └── test_routing.py    # 通道改派核心逻辑单元测试（标准库 unittest）
+│   ├── test_routing.py    # 通道改派核心逻辑单元测试（标准库 unittest）
+│   └── test_merge.py      # 三方合并核心逻辑单元测试（标准库 unittest）
 ├── requirements.txt
 ├── Dockerfile
 └── docker-compose.yml
