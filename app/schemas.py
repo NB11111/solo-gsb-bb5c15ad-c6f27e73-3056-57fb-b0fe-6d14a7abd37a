@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -286,6 +286,78 @@ class ReconcileResponse(BaseModel):
         ..., description="未匹配的实播记录 id（额外播出），按 id 升序"
     )
     total_penalty: int = Field(..., description="总罚分（匹配偏差绝对值之和 + 未匹配罚分）")
+
+
+class MergeRequest(BaseModel):
+    """POST /versions/merge 请求体：base / left / right 三份 /compile 同格式口令数组。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    base: list[CommandItem] = Field(
+        ..., description="合并基线口令数组，格式与 POST /compile 的请求体一致"
+    )
+    left: list[CommandItem] = Field(
+        ..., description="左侧版本口令数组，格式与 POST /compile 的请求体一致"
+    )
+    right: list[CommandItem] = Field(
+        ..., description="右侧版本口令数组，格式与 POST /compile 的请求体一致"
+    )
+
+
+class MergeDivergence(BaseModel):
+    id: str = Field(..., description="发生分歧的口令 id")
+    field: Literal["channel", "anchor", "offset_ms", "duration_ms"] = Field(
+        ..., description="发生分歧的字段名，按 (id, field) 排序"
+    )
+    kind: Literal["MODIFY_MODIFY", "ADD_ADD", "DELETE_MODIFY"] = Field(
+        ...,
+        description=(
+            "分歧类型：双侧对同一字段改成不同值（MODIFY_MODIFY）；"
+            "双侧新增同 id 但字段值不同（ADD_ADD）；"
+            "一侧删除整条口令而另一侧修改该字段（DELETE_MODIFY）"
+        ),
+    )
+    base_value: str | int | None = Field(
+        ..., description="base 中该字段的值；双侧新增或 base 被删除时为 null"
+    )
+    left_value: str | int | None = Field(
+        ..., description="left 中该字段的值；left 删除该口令时为 null"
+    )
+    right_value: str | int | None = Field(
+        ..., description="right 中该字段的值；right 删除该口令时为 null"
+    )
+
+
+class MergeResponseMerged(BaseModel):
+    """无分歧时的合并成功响应：合并口令 + 与 /compile 同结构的时间线和冲突对。"""
+
+    status: Literal["merged"] = Field(
+        ..., description="合并结果状态：merged（无分歧，已完成编排校验）"
+    )
+    commands: list[CommandItem] = Field(
+        ..., description="合并后的口令数组（已补全缺省字段），按 id 升序"
+    )
+    timeline: list[TimelineEntry] = Field(
+        ..., description="对合并口令调用编排器得到的时间线，结构与 /compile 一致"
+    )
+    conflicts: list[ConflictPair] = Field(
+        ..., description="合并口令的同通道冲突对，结构与 /compile 一致"
+    )
+
+
+class MergeResponseDiverged(BaseModel):
+    """存在分歧时的响应：只返回按 (id, field) 排序的分歧，不生成合并结果。"""
+
+    status: Literal["diverged"] = Field(..., description="合并结果状态：diverged（存在分歧）")
+    divergences: list[MergeDivergence] = Field(
+        ..., description="分歧列表，按 (id, field) 升序"
+    )
+
+
+MergeResponse = Annotated[
+    Union[MergeResponseMerged, MergeResponseDiverged],
+    Field(discriminator="status"),
+]
 
 
 class ErrorBody(BaseModel):

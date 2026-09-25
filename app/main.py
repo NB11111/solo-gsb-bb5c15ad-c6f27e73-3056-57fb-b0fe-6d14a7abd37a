@@ -8,6 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .compiler import CompileError, compile_commands, preview_change
+from .merge import merge_versions
 from .rebalance import rebalance_schedule
 from .reconcile import reconcile_runs
 from .routing import assign_routing
@@ -15,6 +16,8 @@ from .schemas import (
     CommandItem,
     CompileResponse,
     ErrorBody,
+    MergeRequest,
+    MergeResponse,
     PreviewRequest,
     PreviewResponse,
     RebalanceRequest,
@@ -27,7 +30,7 @@ from .schemas import (
 
 app = FastAPI(
     title="直播导播口令编排 API",
-    version="1.4.0",
+    version="1.5.0",
     description=(
         "接收导播口令数组，解析锚点依赖得到每条口令的起止毫秒时间，"
         "并列出同通道半开区间重叠的冲突 id 对；"
@@ -36,7 +39,8 @@ app = FastAPI(
         "直播结束后还可将计划口令与实播记录按通道保序对账，"
         "最小化起止偏差与漏播、额外播出罚分之和；"
         "亦可在不改变任何起止时刻的前提下，把口令全局改派到按 id 指定的"
-        "备用通道，求改派口令最少的无冲突方案。"
+        "备用通道，求改派口令最少的无冲突方案；"
+        "还可对 base / left / right 三份口令版本按 id 和字段做无状态三方合并。"
     ),
 )
 
@@ -136,4 +140,20 @@ async def assign(body: RoutingAssignRequest) -> dict:
     return assign_routing(
         [item.model_dump() for item in body.commands],
         [spec.model_dump() for spec in body.backups],
+    )
+
+
+@app.post(
+    "/versions/merge",
+    response_model=MergeResponse,
+    tags=["versions"],
+    summary="口令三方合并：按 id 和字段合并三份口令版本并校验编排",
+    responses={422: {"model": ErrorBody, "description": "请求非法、版本内重复 id 或合并口令编排失败"}},
+)
+async def merge(body: MergeRequest) -> dict:
+    # 请求无状态：核心逻辑不依赖 Pydantic，直接喂入 dict 以便独立测试与复用
+    return merge_versions(
+        [item.model_dump() for item in body.base],
+        [item.model_dump() for item in body.left],
+        [item.model_dump() for item in body.right],
     )
